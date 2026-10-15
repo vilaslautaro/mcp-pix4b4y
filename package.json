@@ -1,7 +1,7 @@
 {
   "name": "pixabay-mcp",
-  "version": "1.0.0",
-  "description": "Servidor MCP de Pixabay: remoto (Vercel) y extensión de Claude Desktop (.mcpb)",
+  "version": "1.1.0",
+  "description": "Servidor MCP de Pixabay: remoto (Vercel) y extensi\u00f3n de Claude Desktop (.mcpb)",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build:mcpb": "esbuild src/stdio.ts --bundle --platform=node --format=esm --target=node18 --outfile=mcpb/server/index.mjs && mcpb validate mcpb/manifest.json && mcpb pack mcpb dist/pixabay.mcpb"
@@ -9,6 +9,7 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",
+    "jpeg-js": "^0.4.4",
     "zod": "^4.6.5"
   },
   "devDependencies": {

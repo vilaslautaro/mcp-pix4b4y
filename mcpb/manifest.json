@@ -3,26 +3,54 @@
   "manifest_version": "0.3",
   "name": "pixabay",
   "display_name": "Pixabay",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Buscá fotos, ilustraciones y videos libres de derechos en Pixabay desde Claude.",
   "long_description": "Busca imágenes y videos de Pixabay por palabra clave, orientación, color, categoría y tipo. Solo lectura: no toca tus archivos ni envía datos a ningún otro sitio. Necesitás una API key gratuita de pixabay.com/api/docs.",
-  "author": { "name": "Lautaro Vilas" },
+  "author": {
+    "name": "Lautaro Vilas"
+  },
   "license": "MIT",
-  "keywords": ["pixabay", "imágenes", "videos", "stock", "ecommerce"],
+  "keywords": [
+    "pixabay",
+    "imágenes",
+    "videos",
+    "stock",
+    "ecommerce"
+  ],
   "server": {
     "type": "node",
     "entry_point": "server/index.mjs",
     "mcp_config": {
       "command": "node",
-      "args": ["${__dirname}/server/index.mjs"],
-      "env": { "PIXABAY_API_KEY": "${user_config.api_key}" }
+      "args": [
+        "${__dirname}/server/index.mjs"
+      ],
+      "env": {
+        "PIXABAY_API_KEY": "${user_config.api_key}"
+      }
     }
   },
   "tools": [
-    { "name": "search_images", "description": "Buscar fotos, ilustraciones y vectores" },
-    { "name": "search_videos", "description": "Buscar videos" },
-    { "name": "get_image", "description": "Imagen por ID" },
-    { "name": "get_video", "description": "Video por ID" }
+    {
+      "name": "search_videos",
+      "description": "Buscar videos con filtros (orientación, duración, recorte 9:16) y grilla de miniaturas"
+    },
+    {
+      "name": "get_videos",
+      "description": "Varios videos por ID en una llamada"
+    },
+    {
+      "name": "get_video",
+      "description": "Video por ID"
+    },
+    {
+      "name": "search_images",
+      "description": "Buscar fotos, ilustraciones y vectores, con grilla opcional"
+    },
+    {
+      "name": "get_image",
+      "description": "Imagen por ID"
+    }
   ],
   "user_config": {
     "api_key": {
@@ -34,7 +62,13 @@
     }
   },
   "compatibility": {
-    "platforms": ["darwin", "win32", "linux"],
-    "runtimes": { "node": ">=18.0.0" }
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
   }
 }

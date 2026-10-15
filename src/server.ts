@@ -1,13 +1,25 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { renderGrid, GRID_MAX, type GridCell } from "./grid.js";
 
 const API = "https://pixabay.com/api/";
 const VIDEO_API = "https://pixabay.com/api/videos/";
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
+
+/**
+ * Versión del FORMATO de respuesta (campo `v`). Hay scripts que leen estas respuestas:
+ * cualquier cambio que renombre, quite o cambie el tipo de un campo exige subir este número.
+ * Agregar campos nuevos no lo exige.
+ */
+const FORMAT = 1;
+
+const SCAN = 200; // máximo que deja pedir Pixabay por llamada; se usa cuando hay filtros del lado del servidor
+const BATCH_MAX = 20;
 
 type Params = Record<string, string | number | boolean | undefined>;
+type Raw = { total: number; totalHits: number; hits: any[] };
 
-async function pixabay(base: string, apiKey: string, params: Params) {
+async function pixabay(base: string, apiKey: string, params: Params): Promise<Raw> {
   const qs = new URLSearchParams({ key: apiKey });
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== "") qs.set(k, String(v));
@@ -20,96 +32,205 @@ async function pixabay(base: string, apiKey: string, params: Params) {
     if (res.status === 429) throw new Error("Límite de Pixabay alcanzado (100 búsquedas/min por key). Esperá un minuto.");
     throw new Error(`Pixabay respondió ${res.status}: ${body}`);
   }
-  return res.json() as Promise<{ total: number; totalHits: number; hits: any[] }>;
+  return res.json() as Promise<Raw>;
 }
 
-// Respuestas compactas: solo lo útil, para no gastar contexto del modelo.
-function slimImage(h: any) {
-  return {
-    id: h.id,
-    tags: h.tags,
-    type: h.type,
-    width: h.imageWidth,
-    height: h.imageHeight,
-    preview: h.previewURL,
-    web_640: h.webformatURL,
-    large_1280: h.largeImageURL,
-    page: h.pageURL,
-    author: h.user,
-    downloads: h.downloads,
-    likes: h.likes,
-    ai_generated: h.isAiGenerated ?? undefined,
-  };
+// ---------- utilidades de formato ----------
+
+type Orientation = "vertical" | "horizontal" | "square";
+
+function orientationOf(w: number, h: number): Orientation {
+  if (!w || !h) return "square";
+  const r = w / h;
+  return r < 0.95 ? "vertical" : r > 1.05 ? "horizontal" : "square";
 }
 
-function slimVideo(h: any) {
-  const pick = (v: any) => (v?.url ? { url: v.url, width: v.width, height: v.height, size: v.size } : undefined);
-  return {
-    id: h.id,
-    tags: h.tags,
-    duration_s: h.duration,
-    page: h.pageURL,
-    author: h.user,
-    downloads: h.downloads,
-    likes: h.likes,
-    files: {
-      large: pick(h.videos?.large),
-      medium: pick(h.videos?.medium),
-      small: pick(h.videos?.small),
-      tiny: pick(h.videos?.tiny),
-    },
-    thumbnail: h.videos?.medium?.thumbnail ?? h.videos?.tiny?.thumbnail,
-  };
+const ORIENT_LETTER: Record<Orientation, string> = { vertical: "V", horizontal: "H", square: "C" };
+
+/** Alto del recorte 9:16 más grande que se puede sacar de un cuadro w×h. */
+function cropHeight(w: number, h: number): number {
+  return Math.floor(Math.min(h, (w * 16) / 9));
 }
 
-const NOTE =
-  "Fuente: Pixabay (pixabay.com). Las URLs de archivo son temporales (~24 h): descargá lo que sirva; para un link permanente usá `page`.";
+const mb = (bytes: number) => Math.round((bytes / 1048576) * 10) / 10;
 
-function result(total: number, items: unknown[]) {
-  return {
-    content: [{ type: "text" as const, text: JSON.stringify({ total, count: items.length, note: NOTE, results: items }, null, 2) }],
-  };
+function json(data: unknown) {
+  return { type: "text" as const, text: JSON.stringify(data) };
 }
 
 function fail(e: unknown) {
   return { isError: true, content: [{ type: "text" as const, text: e instanceof Error ? e.message : String(e) }] };
 }
 
+async function withGrid(payload: Record<string, unknown>, cells: GridCell[], wantGrid: boolean) {
+  if (!wantGrid || !cells.length) return { content: [json(payload)] };
+  // grid_count: cuántos results (los primeros) aparecen en la imagen.
+  const image = await renderGrid(cells);
+  return {
+    content: [
+      json({ ...payload, grid_count: Math.min(cells.length, GRID_MAX) }),
+      { type: "image" as const, data: image, mimeType: "image/jpeg" },
+    ],
+  };
+}
+
+// ---------- videos ----------
+
+type VideoFile = { url: string; width: number; height: number; size: number; thumbnail?: string };
+
+function files(h: any): Record<"large" | "medium" | "small" | "tiny", VideoFile | undefined> {
+  const ok = (f: any): VideoFile | undefined => (f?.url ? f : undefined);
+  return { large: ok(h.videos?.large), medium: ok(h.videos?.medium), small: ok(h.videos?.small), tiny: ok(h.videos?.tiny) };
+}
+
+/** medium si alcanza la altura de recorte pedida; si no, large; si ninguno alcanza, el más grande. */
+function pickBest(h: any, minCrop: number) {
+  const f = files(h);
+  const order = [f.medium, f.large].filter(Boolean) as VideoFile[];
+  if (!order.length) return null;
+  const chosen = order.find((x) => cropHeight(x.width, x.height) >= minCrop) ?? order[order.length - 1];
+  return { url: chosen.url, width: chosen.width, height: chosen.height, mb: mb(chosen.size) };
+}
+
+function largestFile(h: any): VideoFile | undefined {
+  const f = files(h);
+  return f.large ?? f.medium ?? f.small ?? f.tiny;
+}
+
+function videoItem(h: any, index: number, minCrop: number) {
+  const big = largestFile(h);
+  const w = big?.width ?? 0;
+  const ht = big?.height ?? 0;
+  const f = files(h);
+  return {
+    index,
+    id: h.id as number,
+    tags: h.tags as string,
+    duration: h.duration as number,
+    orientation: orientationOf(w, ht),
+    width: w,
+    height: ht,
+    crop_height: cropHeight(w, ht),
+    best: pickBest(h, minCrop),
+    thumbnail: (f.medium?.thumbnail || f.tiny?.thumbnail || "") as string,
+    page: h.pageURL as string,
+  };
+}
+
+function videoCell(h: any, item: ReturnType<typeof videoItem>): GridCell {
+  const f = files(h);
+  return {
+    thumb: f.tiny?.thumbnail || f.small?.thumbnail || f.medium?.thumbnail,
+    line1: `${item.index} #${item.id}`,
+    line2: `${item.duration}s ${ORIENT_LETTER[item.orientation]}`,
+  };
+}
+
+// ---------- imágenes ----------
+
+function imageItem(h: any, index: number) {
+  return {
+    index,
+    id: h.id as number,
+    tags: h.tags as string,
+    type: h.type as string,
+    orientation: orientationOf(h.imageWidth, h.imageHeight),
+    width: h.imageWidth as number,
+    height: h.imageHeight as number,
+    web: h.webformatURL as string,
+    large: h.largeImageURL as string,
+    page: h.pageURL as string,
+  };
+}
+
+function imageCell(h: any, item: ReturnType<typeof imageItem>): GridCell {
+  return { thumb: h.webformatURL || h.previewURL, line1: `${item.index} #${item.id}`, line2: ORIENT_LETTER[item.orientation] };
+}
+
+// ---------- esquemas ----------
+
 const common = {
-  q: z.string().max(100).optional().describe("Qué buscar. Conviene en inglés para más resultados (ej: 'woman skincare')."),
+  q: z.string().max(100).optional().describe("Qué buscar. En inglés trae muchos más resultados (ej: 'woman skincare')."),
   lang: z.string().optional().describe("Idioma de la búsqueda, ej 'es' o 'en'. Default 'en'."),
   category: z
     .enum(["backgrounds", "fashion", "nature", "science", "education", "feelings", "health", "people", "religion", "places", "animals", "industry", "computer", "food", "sports", "transportation", "travel", "buildings", "business", "music"])
     .optional(),
-  min_width: z.number().int().min(0).optional(),
-  min_height: z.number().int().min(0).optional(),
   editors_choice: z.boolean().optional().describe("Solo piezas premiadas por los editores (mejor calidad)."),
   safesearch: z.boolean().optional(),
   order: z.enum(["popular", "latest"]).optional(),
-  page: z.number().int().min(1).optional(),
-  per_page: z.number().int().min(3).max(200).optional().describe("Resultados por página, 3 a 200. Default 20."),
+  per_page: z.number().int().min(1).max(50).optional().describe("Cuántos resultados devolver. Default 10."),
+  grid: z
+    .boolean()
+    .optional()
+    .describe(`Si es true, además del JSON devuelve una imagen con las miniaturas numeradas (índice, id, duración, orientación) en el mismo orden que results. Máximo ${GRID_MAX} celdas. Sirve para elegir sin descargar nada.`),
 };
+
+const ITEM_ID = z.union([z.number().int(), z.string().regex(/^\d+$/)]);
 
 export function createServer(apiKey: string) {
   const server = new McpServer({ name: "pixabay", version: VERSION });
 
   server.registerTool(
-    "search_images",
+    "search_videos",
     {
-      title: "Buscar imágenes en Pixabay",
-      description: "Busca fotos, ilustraciones y vectores libres de derechos en Pixabay.",
+      title: "Buscar videos en Pixabay",
+      description:
+        "Busca videos libres de derechos en Pixabay, filtrados del lado del servidor por orientación, duración y altura de recorte 9:16. " +
+        "Cada resultado trae `best`: el archivo justo para usar (url, alto, MB). Las URLs de archivo vencen en ~24 h: descargá lo elegido; `page` es el link permanente. " +
+        "Si `count` da 0 o pocos, mirá `dropped_by` para saber qué filtro aflojar.",
       inputSchema: {
         ...common,
-        image_type: z.enum(["all", "photo", "illustration", "vector"]).optional(),
-        orientation: z.enum(["all", "horizontal", "vertical"]).optional(),
-        colors: z.string().optional().describe("Filtro de color separado por comas: grayscale, transparent, red, orange, yellow, green, turquoise, blue, lilac, pink, white, gray, black, brown."),
+        video_type: z.enum(["all", "film", "animation"]).optional(),
+        orientation: z.enum(["any", "vertical", "horizontal"]).optional().describe("Default 'any'. Los verticales en Pixabay son pocos."),
+        min_duration: z.number().min(0).optional().describe("Duración mínima en segundos."),
+        min_crop_height: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Alto mínimo (px) del recorte 9:16 que se puede sacar del video. Default 1080. 0 desactiva el filtro."),
+        page: z.number().int().min(1).optional().describe("Página de búsqueda en Pixabay (de 200 videos cada una). Usala si `more` es true."),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async (args) => {
       try {
-        const d = await pixabay(API, apiKey, { ...args, per_page: args.per_page ?? 20 });
-        return result(d.totalHits, d.hits.map(slimImage));
+        const perPage = args.per_page ?? 10;
+        const orientation = args.orientation ?? "any";
+        const minDur = args.min_duration ?? 0;
+        const minCrop = args.min_crop_height ?? 1080;
+        const page = args.page ?? 1;
+        const { per_page, grid, orientation: _o, min_duration, min_crop_height, page: _p, ...pass } = args;
+
+        const d = await pixabay(VIDEO_API, apiKey, { ...pass, page, per_page: SCAN });
+
+        const dropped_by = { orientation: 0, min_duration: 0, crop_height: 0 };
+        const kept: any[] = [];
+        for (const h of d.hits) {
+          const big = largestFile(h);
+          const o = orientationOf(big?.width ?? 0, big?.height ?? 0);
+          let ok = true;
+          if (orientation !== "any" && o !== orientation) { dropped_by.orientation++; ok = false; }
+          if (minDur && (h.duration ?? 0) < minDur) { dropped_by.min_duration++; ok = false; }
+          if (minCrop && cropHeight(big?.width ?? 0, big?.height ?? 0) < minCrop) { dropped_by.crop_height++; ok = false; }
+          if (ok) kept.push(h);
+        }
+
+        const chosen = kept.slice(0, perPage);
+        const results = chosen.map((h, i) => videoItem(h, i + 1, minCrop));
+        const payload = {
+          v: FORMAT,
+          total_hits: d.totalHits,
+          scanned: d.hits.length,
+          matched: kept.length,
+          count: results.length,
+          dropped_by,
+          page,
+          more: page * SCAN < d.totalHits,
+          results,
+        };
+        const cells = chosen.map((h, i) => videoCell(h, results[i]));
+        return await withGrid(payload, cells, !!grid);
       } catch (e) {
         return fail(e);
       }
@@ -117,20 +238,67 @@ export function createServer(apiKey: string) {
   );
 
   server.registerTool(
-    "search_videos",
+    "get_videos",
     {
-      title: "Buscar videos en Pixabay",
-      description: "Busca videos libres de derechos en Pixabay. Devuelve archivos en varias resoluciones.",
+      title: "Varios videos por ID",
+      description: `Trae hasta ${BATCH_MAX} videos de Pixabay por ID en una sola llamada, con el archivo \`best\` de cada uno. Mismo formato de item que search_videos.`,
+      inputSchema: {
+        ids: z.array(ITEM_ID).min(1).max(BATCH_MAX).describe("IDs de videos de Pixabay"),
+        min_crop_height: z.number().int().min(0).optional().describe("Alto de recorte 9:16 que tiene que alcanzar `best`. Default 1080."),
+        grid: common.grid,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ ids, min_crop_height, grid }) => {
+      try {
+        const minCrop = min_crop_height ?? 1080;
+        const unique = [...new Set(ids.map(String))];
+        const found = await Promise.all(
+          unique.map((id) =>
+            pixabay(VIDEO_API, apiKey, { id })
+              .then((d) => d.hits[0] ?? null)
+              .catch((e) => {
+                if (/inválida|Límite/.test(String(e?.message))) throw e;
+                return null; // ID inexistente: Pixabay responde 400
+              })
+          )
+        );
+        const hits = found.filter(Boolean);
+        const not_found = unique.filter((_, i) => !found[i]).map(Number);
+        const results = hits.map((h, i) => videoItem(h, i + 1, minCrop));
+        const payload = { v: FORMAT, count: results.length, not_found, results };
+        return await withGrid(payload, hits.map((h, i) => videoCell(h, results[i])), !!grid);
+      } catch (e) {
+        return fail(e);
+      }
+    }
+  );
+
+  server.registerTool(
+    "search_images",
+    {
+      title: "Buscar imágenes en Pixabay",
+      description: "Busca fotos, ilustraciones y vectores libres de derechos en Pixabay. `large` es de 1280 px. Las URLs vencen en ~24 h; `page` es el link permanente.",
       inputSchema: {
         ...common,
-        video_type: z.enum(["all", "film", "animation"]).optional(),
+        image_type: z.enum(["all", "photo", "illustration", "vector"]).optional(),
+        orientation: z.enum(["all", "horizontal", "vertical"]).optional(),
+        colors: z.string().optional().describe("Filtro de color separado por comas: grayscale, transparent, red, orange, yellow, green, turquoise, blue, lilac, pink, white, gray, black, brown."),
+        min_width: z.number().int().min(0).optional(),
+        min_height: z.number().int().min(0).optional(),
+        page: z.number().int().min(1).optional(),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async (args) => {
       try {
-        const d = await pixabay(VIDEO_API, apiKey, { ...args, per_page: args.per_page ?? 20 });
-        return result(d.totalHits, d.hits.map(slimVideo));
+        const { grid, per_page, ...pass } = args;
+        const perPage = Math.max(3, per_page ?? 10); // Pixabay exige mínimo 3
+        const d = await pixabay(API, apiKey, { ...pass, per_page: perPage });
+        const hits = d.hits.slice(0, per_page ?? 10);
+        const results = hits.map((h, i) => imageItem(h, i + 1));
+        const payload = { v: FORMAT, total_hits: d.totalHits, count: results.length, page: args.page ?? 1, results };
+        return await withGrid(payload, hits.map((h, i) => imageCell(h, results[i])), !!grid);
       } catch (e) {
         return fail(e);
       }
@@ -142,13 +310,13 @@ export function createServer(apiKey: string) {
     {
       title: "Imagen por ID",
       description: "Trae una imagen de Pixabay por su ID.",
-      inputSchema: { id: z.union([z.string(), z.number()]).describe("ID de la imagen") },
+      inputSchema: { id: ITEM_ID.describe("ID de la imagen") },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ id }) => {
       try {
         const d = await pixabay(API, apiKey, { id: String(id) });
-        return result(d.totalHits, d.hits.map(slimImage));
+        return { content: [json({ v: FORMAT, count: d.hits.length, results: d.hits.map((h, i) => imageItem(h, i + 1)) })] };
       } catch (e) {
         return fail(e);
       }
@@ -159,14 +327,17 @@ export function createServer(apiKey: string) {
     "get_video",
     {
       title: "Video por ID",
-      description: "Trae un video de Pixabay por su ID.",
-      inputSchema: { id: z.union([z.string(), z.number()]).describe("ID del video") },
+      description: "Trae un video de Pixabay por su ID. Para varios, usá get_videos.",
+      inputSchema: {
+        id: ITEM_ID.describe("ID del video"),
+        min_crop_height: z.number().int().min(0).optional().describe("Default 1080."),
+      },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ id }) => {
+    async ({ id, min_crop_height }) => {
       try {
         const d = await pixabay(VIDEO_API, apiKey, { id: String(id) });
-        return result(d.totalHits, d.hits.map(slimVideo));
+        return { content: [json({ v: FORMAT, count: d.hits.length, results: d.hits.map((h, i) => videoItem(h, i + 1, min_crop_height ?? 1080)) })] };
       } catch (e) {
         return fail(e);
       }

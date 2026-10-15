@@ -31,9 +31,15 @@ npm run build:mcpb   # genera dist/pixabay.mcpb
 
 ## Herramientas
 
-- `search_images` — fotos, ilustraciones y vectores (orientación, color, categoría, tamaño mínimo, editors choice)
-- `search_videos` — videos en varias resoluciones
-- `get_image` / `get_video` — por ID
+- `search_videos` — filtros del lado del servidor: `orientation`, `min_duration`, `min_crop_height` (alto del recorte 9:16, default 1080). Devuelve `dropped_by` con cuántos no cumplen cada filtro y `best` con el archivo justo (url, alto, MB).
+- `get_videos` — hasta 20 videos por ID en una llamada.
+- `search_images` — fotos, ilustraciones y vectores.
+- `get_image` / `get_video` — por ID.
+- `grid: true` en las búsquedas y en `get_videos` agrega una imagen (~1000 px, hasta 20 celdas) con las miniaturas numeradas en el orden de `results`.
+
+### Contrato de respuesta
+
+Todas las respuestas traen `v` (versión del formato, hoy `1`). Hay scripts que las leen: renombrar, quitar o cambiar el tipo de un campo exige subir `v` (constante `FORMAT` en `src/server.ts`). Agregar campos no.
 
 Las URLs de archivo que devuelve Pixabay vencen en ~24 h: descargá lo que uses.
 
