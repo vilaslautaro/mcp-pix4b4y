@@ -160,23 +160,31 @@ function imageCell(h: any, item: ReturnType<typeof imageItem>): GridCell {
 
 // ---------- esquemas ----------
 
+// Tolerancia de tipos: clientes con la lista de herramientas vieja en caché mandan "true" o "10" como texto.
+const bool = () =>
+  z.preprocess((v) => (v === "true" || v === "1" ? true : v === "false" || v === "0" || v === "" ? false : v), z.boolean());
+const num = (min = -Infinity) =>
+  z.preprocess((v) => (typeof v === "string" && v.trim() !== "" && !isNaN(Number(v)) ? Number(v) : v), z.number().min(min));
+const int = (min = Number.MIN_SAFE_INTEGER, max = Number.MAX_SAFE_INTEGER) =>
+  z.preprocess((v) => (typeof v === "string" && /^\d+$/.test(v.trim()) ? Number(v) : v), z.number().int().min(min).max(max));
+
+const ITEM_ID = z.union([int(), z.string().regex(/^\d+$/)]);
+
 const common = {
   q: z.string().max(100).optional().describe("Qué buscar. En inglés trae muchos más resultados (ej: 'woman skincare')."),
   lang: z.string().optional().describe("Idioma de la búsqueda, ej 'es' o 'en'. Default 'en'."),
   category: z
     .enum(["backgrounds", "fashion", "nature", "science", "education", "feelings", "health", "people", "religion", "places", "animals", "industry", "computer", "food", "sports", "transportation", "travel", "buildings", "business", "music"])
     .optional(),
-  editors_choice: z.boolean().optional().describe("Solo piezas premiadas por los editores (mejor calidad)."),
-  safesearch: z.boolean().optional(),
+  editors_choice: bool().optional().describe("Solo piezas premiadas por los editores (mejor calidad)."),
+  safesearch: bool().optional(),
   order: z.enum(["popular", "latest"]).optional(),
-  per_page: z.number().int().min(1).max(50).optional().describe("Cuántos resultados devolver. Default 10."),
-  grid: z
-    .boolean()
+  per_page: int(1, 50).optional().describe("Cuántos resultados devolver. Default 10."),
+  grid: bool()
     .optional()
     .describe(`Si es true, además del JSON devuelve una imagen con las miniaturas numeradas (índice, id, duración, orientación) en el mismo orden que results. Máximo ${GRID_MAX} celdas. Sirve para elegir sin descargar nada.`),
 };
 
-const ITEM_ID = z.union([z.number().int(), z.string().regex(/^\d+$/)]);
 
 export function createServer(apiKey: string) {
   const server = new McpServer({ name: "pixabay", version: VERSION });
@@ -193,21 +201,15 @@ export function createServer(apiKey: string) {
         ...common,
         video_type: z.enum(["all", "film", "animation"]).optional(),
         orientation: z.enum(["any", "vertical", "horizontal"]).optional().describe("Default 'any'. Los verticales en Pixabay son pocos."),
-        min_duration: z.number().min(0).optional().describe("Duración mínima en segundos."),
-        min_crop_height: z
-          .number()
-          .int()
-          .min(0)
+        min_duration: num(0).optional().describe("Duración mínima en segundos."),
+        min_crop_height: int(0)
           .optional()
           .describe("Filtro: alto mínimo (px) del recorte 9:16 que se puede sacar del video. Default 1080. 0 desactiva el filtro."),
-        best_crop_height: z
-          .number()
-          .int()
-          .min(0)
+        best_crop_height: int(0)
           .optional()
           .describe(`Alto de recorte 9:16 que tiene que alcanzar \`best\` (elige el archivo más liviano que llega). Default ${BEST_CROP}. No filtra.`),
-        exclude_ai: z.boolean().optional().describe("Si es true, descarta los videos generados con IA. Default false."),
-        page: z.number().int().min(1).optional().describe("Página de búsqueda en Pixabay (de 200 videos cada una). Usala si `more` es true."),
+        exclude_ai: bool().optional().describe("Si es true, descarta los videos generados con IA. Default false."),
+        page: int(1).optional().describe("Página de búsqueda en Pixabay (de 200 videos cada una). Usala si `more` es true."),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -265,7 +267,7 @@ export function createServer(apiKey: string) {
       description: `Trae hasta ${BATCH_MAX} videos de Pixabay por ID en una sola llamada, con el archivo \`best\` de cada uno. Mismo formato de item que search_videos.`,
       inputSchema: {
         ids: z.array(ITEM_ID).min(1).max(BATCH_MAX).describe("IDs de videos de Pixabay"),
-        best_crop_height: z.number().int().min(0).optional().describe(`Alto de recorte 9:16 que tiene que alcanzar \`best\`. Default ${BEST_CROP}.`),
+        best_crop_height: int(0).optional().describe(`Alto de recorte 9:16 que tiene que alcanzar \`best\`. Default ${BEST_CROP}.`),
         grid: common.grid,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
@@ -305,9 +307,9 @@ export function createServer(apiKey: string) {
         image_type: z.enum(["all", "photo", "illustration", "vector"]).optional(),
         orientation: z.enum(["all", "horizontal", "vertical"]).optional(),
         colors: z.string().optional().describe("Filtro de color separado por comas: grayscale, transparent, red, orange, yellow, green, turquoise, blue, lilac, pink, white, gray, black, brown."),
-        min_width: z.number().int().min(0).optional(),
-        min_height: z.number().int().min(0).optional(),
-        page: z.number().int().min(1).optional(),
+        min_width: int(0).optional(),
+        min_height: int(0).optional(),
+        page: int(1).optional(),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -351,7 +353,7 @@ export function createServer(apiKey: string) {
       description: "Trae un video de Pixabay por su ID. Para varios, usá get_videos.",
       inputSchema: {
         id: ITEM_ID.describe("ID del video"),
-        best_crop_height: z.number().int().min(0).optional().describe(`Default ${BEST_CROP}.`),
+        best_crop_height: int(0).optional().describe(`Default ${BEST_CROP}.`),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
