@@ -31,7 +31,7 @@ npm run build:mcpb   # genera dist/pixabay.mcpb
 
 ## Herramientas
 
-- `search_videos` — filtros del lado del servidor: `orientation`, `min_duration`, `min_crop_height` (alto del recorte 9:16, default 1080). Devuelve `dropped_by` con cuántos no cumplen cada filtro y `best` con el archivo justo (url, alto, MB).
+- `search_videos` — filtros del lado del servidor: `orientation`, `min_duration`, `min_crop_height` (alto del recorte 9:16, default 1080). `exclude_ai: true` descarta lo generado con IA (cada item trae `ai_generated`). Devuelve `dropped_by` con cuántos no cumplen cada filtro y `best`: el archivo más liviano con recorte 9:16 de al menos `best_crop_height` (default 1440; si ninguno llega, el más grande), con url, alto y MB. Los `tags` vienen cortados a los primeros 8.
 - `get_videos` — hasta 20 videos por ID en una llamada.
 - `search_images` — fotos, ilustraciones y vectores.
 - `get_image` / `get_video` — por ID.
